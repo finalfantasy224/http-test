@@ -9,11 +9,194 @@ import urllib3
 from urllib3.exceptions import InsecureRequestWarning
 import ssl
 import socket
+import re
+import base64
 from datetime import datetime
 from history_db import HistoryDB
 
 # 禁用SSL警告
 urllib3.disable_warnings(InsecureRequestWarning)
+
+
+def tokenize_curl(s):
+    """将 curl 命令字符串按 shell 规则拆分为 token，尊重单引号、双引号。"""
+    # 行尾反斜杠续行：去掉 \ 与后续换行
+    s = re.sub(r'\\\s*\n', '\n', s)
+    s = re.sub(r'\\\s*\r\n', '\n', s)
+    tokens = []
+    i = 0
+    n = len(s)
+    current = []
+
+    while i < n:
+        c = s[i]
+        if c in ' \t\n\r':
+            if current:
+                tokens.append(''.join(current))
+                current = []
+            i += 1
+            continue
+        if c == "'":
+            if current:
+                tokens.append(''.join(current))
+                current = []
+            i += 1
+            while i < n and s[i] != "'":
+                if s[i] == '\\':
+                    i += 1
+                    if i < n:
+                        current.append(s[i])
+                    i += 1
+                else:
+                    current.append(s[i])
+                    i += 1
+            if i < n:
+                i += 1  # skip closing '
+            tokens.append(''.join(current))
+            current = []
+            continue
+        if c == '"':
+            if current:
+                tokens.append(''.join(current))
+                current = []
+            i += 1
+            while i < n and s[i] != '"':
+                if s[i] == '\\':
+                    i += 1
+                    if i < n:
+                        current.append(s[i])
+                    i += 1
+                else:
+                    current.append(s[i])
+                    i += 1
+            if i < n:
+                i += 1
+            tokens.append(''.join(current))
+            current = []
+            continue
+        current.append(c)
+        i += 1
+
+    if current:
+        tokens.append(''.join(current))
+    return tokens
+
+
+def parse_curl_command(curl_str):
+    """
+    解析 curl 命令字符串，返回请求参数字典。
+    返回: dict 包含 method, url, headers, body；解析失败抛出 ValueError。
+    """
+    curl_str = curl_str.strip()
+    if not curl_str.lower().startswith('curl'):
+        raise ValueError("不是有效的 curl 命令（应以 curl 开头）")
+
+    tokens = tokenize_curl(curl_str)
+    if not tokens:
+        raise ValueError("无法解析 curl 命令")
+
+    # 去掉开头的 "curl"
+    if tokens[0].lower() == 'curl':
+        tokens = tokens[1:]
+
+    method = "GET"
+    url = None
+    headers = {}
+    body = None
+    body_parts = []
+    i = 0
+
+    while i < len(tokens):
+        t = tokens[i]
+        t_lower = t.lower()
+
+        if t in ('-X', '--request'):
+            i += 1
+            if i < len(tokens):
+                method = tokens[i].upper()
+            i += 1
+            continue
+
+        if t in ('-H', '--header'):
+            i += 1
+            if i < len(tokens):
+                h = tokens[i]
+                if ':' in h:
+                    k, _, v = h.partition(':')
+                    headers[k.strip()] = v.strip()
+            i += 1
+            continue
+
+        if t_lower in ('-d', '--data', '--data-raw', '--data-ascii'):
+            i += 1
+            if i < len(tokens):
+                body_parts.append(tokens[i])
+            i += 1
+            continue
+
+        if t_lower == '--data-binary':
+            i += 1
+            if i < len(tokens):
+                body_parts.append(tokens[i])
+            i += 1
+            continue
+
+        if t in ('-u', '--user'):
+            i += 1
+            if i < len(tokens):
+                user_pass = tokens[i]
+                if ':' in user_pass:
+                    up = user_pass.split(':', 1)
+                    raw = (up[0] + ':' + up[1]).encode('utf-8')
+                    headers['Authorization'] = 'Basic ' + base64.b64encode(raw).decode('ascii')
+                else:
+                    raw = (user_pass + ':').encode('utf-8')
+                    headers['Authorization'] = 'Basic ' + base64.b64encode(raw).decode('ascii')
+            i += 1
+            continue
+
+        if t in ('-b', '--cookie'):
+            i += 1
+            if i < len(tokens):
+                headers['Cookie'] = tokens[i]
+            i += 1
+            continue
+
+        if t_lower == '--url':
+            i += 1
+            if i < len(tokens):
+                url = tokens[i]
+            i += 1
+            continue
+
+        if t_lower in ('-g', '--get'):
+            method = 'GET'
+            i += 1
+            continue
+
+        # 未加 -X 时，有 -d/--data 通常表示 POST
+        if t.startswith('http://') or t.startswith('https://'):
+            if url is None:
+                url = t
+            i += 1
+            continue
+
+        i += 1
+
+    if body_parts and method == 'GET':
+        method = 'POST'
+    if body_parts:
+        body = '\n'.join(body_parts)
+
+    if url is None:
+        raise ValueError("curl 命令中未找到 URL")
+
+    return {
+        'method': method,
+        'url': url,
+        'headers': headers,
+        'body': body or ''
+    }
 
 class ClosableNotebook(ttk.Frame):
     """可关闭标签页的Notebook控件"""
@@ -133,6 +316,16 @@ class ClosableNotebook(ttk.Frame):
         """获取标签页组件"""
         return self._notebook.nametowidget(name)
 
+    def set_tab_text(self, tab_id, text):
+        """更新标签页标题文字"""
+        tab_frame = self._notebook.nametowidget(tab_id)
+        for w in tab_frame.winfo_children():
+            if isinstance(w, ttk.Frame):
+                for c in w.winfo_children():
+                    if isinstance(c, ttk.Label):
+                        c.configure(text=text)
+                        return
+
 class RequestTab:
     """单个请求标签页类"""
 
@@ -216,6 +409,12 @@ class RequestTab:
         headers_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.headers_tree.configure(yscrollcommand=headers_scroll.set)
 
+        # 绑定双击编辑事件
+        self.headers_tree.bind('<Double-1>', self.on_header_double_click)
+        self.headers_edit_entry = None
+        self.headers_edit_item = None
+        self.headers_edit_column = None
+
         # Headers按钮
         headers_btn_frame = ttk.Frame(headers_frame)
         headers_btn_frame.pack(fill=tk.X, pady=(5, 0))
@@ -287,20 +486,139 @@ class RequestTab:
         resp_headers_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.response_headers_tree.configure(yscrollcommand=resp_headers_scroll.set)
 
+    def on_header_double_click(self, event):
+        """双击 header 单元格时开始编辑"""
+        # 取消之前的编辑
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
+        # 获取点击位置
+        region = self.headers_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        # 获取点击的行和列
+        item = self.headers_tree.identify_row(event.y)
+        column = self.headers_tree.identify_column(event.x)
+
+        if not item:
+            return
+
+        # 列索引：1=key, 2=value
+        if column == "#1":
+            col_index = 0  # key 列
+        elif column == "#2":
+            col_index = 1  # value 列
+        else:
+            return  # 不编辑 #0 列（序号）
+
+        # 获取当前值
+        values = list(self.headers_tree.item(item, 'values'))
+        current_value = values[col_index] if col_index < len(values) else ""
+
+        # 获取单元格位置
+        bbox = self.headers_tree.bbox(item, column)
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        # 创建编辑 Entry（宽度使用像素值）
+        self.headers_edit_entry = ttk.Entry(self.headers_tree)
+        self.headers_edit_entry.place(x=x, y=y, width=width, height=height)
+        self.headers_edit_entry.insert(0, current_value)
+        self.headers_edit_entry.select_range(0, tk.END)
+        self.headers_edit_entry.focus()
+
+        # 保存编辑上下文
+        self.headers_edit_item = item
+        self.headers_edit_column = col_index
+
+        # 绑定事件
+        self.headers_edit_entry.bind('<Return>', lambda e: self.finish_header_edit())
+        self.headers_edit_entry.bind('<Escape>', lambda e: self.cancel_header_edit())
+        self.headers_edit_entry.bind('<FocusOut>', lambda e: self.finish_header_edit())
+
+    def finish_header_edit(self):
+        """完成 header 编辑"""
+        if not self.headers_edit_entry or not self.headers_edit_item:
+            return
+
+        try:
+            new_value = self.headers_edit_entry.get()
+            item = self.headers_edit_item
+            col_index = self.headers_edit_column
+
+            # 检查 item 是否仍然存在
+            if item not in self.headers_tree.get_children() and item != "":
+                # item 已被删除，只清理编辑状态
+                self.headers_edit_entry.destroy()
+                self.headers_edit_entry = None
+                self.headers_edit_item = None
+                self.headers_edit_column = None
+                return
+
+            # 获取当前值
+            values = list(self.headers_tree.item(item, 'values'))
+            # 确保有足够的列
+            while len(values) < 2:
+                values.append("")
+            # 更新对应列的值
+            values[col_index] = new_value
+
+            # 更新 Treeview
+            self.headers_tree.item(item, values=tuple(values))
+        except tk.TclError:
+            # Entry 可能已被销毁
+            pass
+        finally:
+            # 清理
+            if self.headers_edit_entry:
+                try:
+                    self.headers_edit_entry.destroy()
+                except:
+                    pass
+            self.headers_edit_entry = None
+            self.headers_edit_item = None
+            self.headers_edit_column = None
+
+    def cancel_header_edit(self):
+        """取消 header 编辑"""
+        if self.headers_edit_entry:
+            try:
+                self.headers_edit_entry.destroy()
+            except:
+                pass
+            self.headers_edit_entry = None
+            self.headers_edit_item = None
+            self.headers_edit_column = None
+
     def add_header(self):
         """添加header"""
+        # 如果正在编辑，先完成编辑
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
         items = self.headers_tree.get_children()
         new_id = str(len(items) + 1)
         self.headers_tree.insert("", tk.END, text=new_id, values=("", ""))
 
     def delete_header(self):
         """删除header"""
+        # 如果正在编辑，先完成编辑
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
         selected = self.headers_tree.selection()
         if selected:
             self.headers_tree.delete(selected)
 
     def clear_headers(self):
         """清空headers"""
+        # 如果正在编辑，先完成编辑
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
         if messagebox.askyesno("确认", "清空所有Headers?"):
             for item in self.headers_tree.get_children():
                 self.headers_tree.delete(item)
@@ -308,6 +626,10 @@ class RequestTab:
 
     def collect_headers(self):
         """收集headers"""
+        # 如果正在编辑，先完成编辑以确保收集最新值
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
         headers = {}
         for item in self.headers_tree.get_children():
             values = self.headers_tree.item(item, 'values')
@@ -472,6 +794,10 @@ class RequestTab:
 
     def load_request_data(self, request_data):
         """加载请求数据"""
+        # 如果正在编辑，先完成编辑
+        if self.headers_edit_entry:
+            self.finish_header_edit()
+
         self.url_entry.delete(0, tk.END)
         self.url_entry.insert(0, request_data['url'])
         self.method_var.set(request_data['method'])
@@ -554,6 +880,49 @@ class SaveRequestDialog:
         """取消按钮点击"""
         self.result = None
         self.dialog.destroy()
+
+
+class ImportCurlDialog:
+    """导入 curl 命令的对话框"""
+
+    def __init__(self, parent):
+        self.curl_text = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("导入 curl 命令")
+        self.dialog.geometry("700x400")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        # 居中显示
+        self.dialog.geometry("+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50))
+
+        ttk.Label(self.dialog, text="粘贴 curl 命令（支持 -X, -H, -d, -u, -b, --url 等常用选项）:").pack(anchor=tk.W, padx=10, pady=(15, 5))
+
+        self.text = scrolledtext.ScrolledText(self.dialog, wrap=tk.WORD, height=14, font=("Consolas", 10))
+        self.text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.text.focus()
+
+        btn_frame = ttk.Frame(self.dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 15))
+        ttk.Button(btn_frame, text="确定", command=self.ok_clicked).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="取消", command=self.cancel_clicked).pack(side=tk.LEFT)
+
+        self.dialog.bind('<Control-Return>', lambda e: self.ok_clicked())
+        self.dialog.bind('<Escape>', lambda e: self.cancel_clicked())
+
+    def ok_clicked(self):
+        raw = self.text.get(1.0, tk.END).strip()
+        if not raw:
+            messagebox.showwarning("警告", "请粘贴 curl 命令", parent=self.dialog)
+            return
+        self.curl_text = raw
+        self.dialog.destroy()
+
+    def cancel_clicked(self):
+        self.curl_text = None
+        self.dialog.destroy()
+
 
 class HistoryPanel:
     """历史记录侧边栏面板"""
@@ -735,6 +1104,7 @@ class HTTPClientApp:
         menubar.add_cascade(label="文件", menu=file_menu)
         file_menu.add_command(label="新建请求 (Ctrl+N)", command=self.new_tab)
         file_menu.add_separator()
+        file_menu.add_command(label="导入 curl", command=self.import_curl)
         file_menu.add_command(label="导入请求", command=self.import_requests)
         file_menu.add_command(label="导出请求", command=self.export_requests)
         file_menu.add_separator()
@@ -777,6 +1147,7 @@ class HTTPClientApp:
         toolbar.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Button(toolbar, text="新建请求", command=self.new_tab).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text="导入 curl", command=self.import_curl).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(toolbar, text="发送", command=self.send_current_request).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(toolbar, text="保存", command=self.save_current_request).pack(side=tk.LEFT)
 
@@ -851,6 +1222,29 @@ class HTTPClientApp:
         if current_tab:
             current_tab.load_request_data(request_data)
             messagebox.showinfo("提示", "请求已加载到当前标签页")
+
+    def import_curl(self):
+        """导入 curl 命令：解析后在新标签页展示完整请求"""
+        dialog = ImportCurlDialog(self.root)
+        self.root.wait_window(dialog.dialog)
+        if not dialog.curl_text:
+            return
+        try:
+            request_data = parse_curl_command(dialog.curl_text)
+        except ValueError as e:
+            messagebox.showerror("解析失败", str(e))
+            return
+        # 新建标签页并填充
+        tab = self.new_tab()
+        tab.load_request_data(request_data)
+        short_url = request_data['url']
+        if len(short_url) > 30:
+            short_url = short_url[:27] + "..."
+        tab_name = f"{request_data['method']} {short_url}"
+        current_tab_id = self.notebook.select()
+        if current_tab_id:
+            self.notebook.set_tab_text(current_tab_id, tab_name)
+        messagebox.showinfo("成功", "curl 已解析并加载到新标签页")
 
     def import_requests(self):
         """导入请求记录"""
