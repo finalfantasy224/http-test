@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, simpledialog
+from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 import requests
 import json
 import urllib3
@@ -11,6 +11,7 @@ import ssl
 import socket
 import re
 import base64
+import os
 from datetime import datetime
 from history_db import HistoryDB
 
@@ -333,6 +334,7 @@ class RequestTab:
         self.db = db
         self.parent = parent_notebook
         self.response_data = None
+        self.selected_files = []
 
         # 创建标签页内容
         self.frame = ttk.Frame(parent_notebook, padding="10")
@@ -435,6 +437,45 @@ class RequestTab:
         body_btn_frame = ttk.Frame(body_frame)
         body_btn_frame.pack(fill=tk.X)
         ttk.Button(body_btn_frame, text="清空", command=lambda: self.body_text.delete(1.0, tk.END)).pack(side=tk.LEFT)
+
+        # Files标签页：用于 multipart/form-data 文件上传
+        files_frame = ttk.Frame(self.notebook, padding="5")
+        self.notebook.add(files_frame, text="Files")
+
+        ttk.Label(
+            files_frame,
+            text="添加文件后会使用 multipart/form-data；Body 中的 JSON对象会作为表单字段发送，否则作为 body 字段发送。"
+        ).pack(anchor=tk.W, pady=(0, 5))
+
+        files_tree_frame = ttk.Frame(files_frame)
+        files_tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.files_tree = ttk.Treeview(
+            files_tree_frame,
+            columns=("field", "filename", "path"),
+            show="tree headings",
+            height=6
+        )
+        self.files_tree.heading("#0", text="#")
+        self.files_tree.heading("field", text="字段名")
+        self.files_tree.heading("filename", text="文件名")
+        self.files_tree.heading("path", text="路径")
+        self.files_tree.column("#0", width=50)
+        self.files_tree.column("field", width=120)
+        self.files_tree.column("filename", width=180)
+        self.files_tree.column("path", width=450)
+        self.files_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        files_scroll = ttk.Scrollbar(files_tree_frame, orient=tk.VERTICAL, command=self.files_tree.yview)
+        files_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.files_tree.configure(yscrollcommand=files_scroll.set)
+
+        files_btn_frame = ttk.Frame(files_frame)
+        files_btn_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(files_btn_frame, text="添加文件", command=self.add_files).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(files_btn_frame, text="修改字段名", command=self.rename_file_field).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(files_btn_frame, text="删除", command=self.delete_file).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(files_btn_frame, text="清空", command=self.clear_files).pack(side=tk.LEFT)
 
     def create_response_section(self):
         """创建响应区域"""
@@ -637,6 +678,125 @@ class RequestTab:
                 headers[values[0].strip()] = values[1].strip()
         return headers
 
+    def refresh_files_tree(self):
+        """刷新文件上传列表"""
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
+
+        for index, file_info in enumerate(self.selected_files, 1):
+            self.files_tree.insert(
+                "",
+                tk.END,
+                text=str(index),
+                values=(file_info["field"], file_info["filename"], file_info["path"])
+            )
+
+    def add_files(self):
+        """添加要上传的文件"""
+        file_paths = filedialog.askopenfilenames(title="选择要上传的文件")
+        if not file_paths:
+            return
+
+        field_name = simpledialog.askstring(
+            "字段名",
+            "请输入上传字段名:",
+            initialvalue="file",
+            parent=self.frame
+        )
+        if not field_name:
+            return
+
+        field_name = field_name.strip()
+        if not field_name:
+            messagebox.showwarning("警告", "字段名不能为空")
+            return
+
+        for file_path in file_paths:
+            self.selected_files.append({
+                "field": field_name,
+                "path": file_path,
+                "filename": os.path.basename(file_path)
+            })
+        self.refresh_files_tree()
+
+    def rename_file_field(self):
+        """修改所选文件的上传字段名"""
+        selected = self.files_tree.selection()
+        if not selected:
+            messagebox.showwarning("警告", "请先选择要修改的文件")
+            return
+
+        item = selected[0]
+        index = int(self.files_tree.item(item, 'text')) - 1
+        current_field = self.selected_files[index]["field"]
+        field_name = simpledialog.askstring(
+            "字段名",
+            "请输入新的上传字段名:",
+            initialvalue=current_field,
+            parent=self.frame
+        )
+        if not field_name:
+            return
+
+        field_name = field_name.strip()
+        if not field_name:
+            messagebox.showwarning("警告", "字段名不能为空")
+            return
+
+        self.selected_files[index]["field"] = field_name
+        self.refresh_files_tree()
+
+    def delete_file(self):
+        """删除所选上传文件"""
+        selected = self.files_tree.selection()
+        if not selected:
+            messagebox.showwarning("警告", "请先选择要删除的文件")
+            return
+
+        indexes = sorted(
+            (int(self.files_tree.item(item, 'text')) - 1 for item in selected),
+            reverse=True
+        )
+        for index in indexes:
+            del self.selected_files[index]
+        self.refresh_files_tree()
+
+    def clear_files(self, confirm=True):
+        """清空上传文件列表"""
+        if confirm and self.selected_files and not messagebox.askyesno("确认", "清空所有上传文件?"):
+            return
+        self.selected_files.clear()
+        self.refresh_files_tree()
+
+    def collect_upload_files(self):
+        """打开并组装 requests 的 multipart 文件参数"""
+        opened_files = []
+        upload_files = []
+        try:
+            for file_info in self.selected_files:
+                file_obj = open(file_info["path"], "rb")
+                opened_files.append(file_obj)
+                upload_files.append((file_info["field"], (file_info["filename"], file_obj)))
+            return upload_files, opened_files
+        except Exception:
+            for file_obj in opened_files:
+                file_obj.close()
+            raise
+
+    def collect_multipart_data(self, body):
+        """将 Body 内容转换为 multipart 文本字段"""
+        if not body:
+            return None
+
+        try:
+            parsed_body = json.loads(body)
+            if isinstance(parsed_body, dict):
+                return {str(key): str(value) for key, value in parsed_body.items()}
+        except json.JSONDecodeError:
+            pass
+
+        return {"body": body}
+
     def save_request(self):
         """保存请求到历史记录"""
         url = self.url_entry.get().strip()
@@ -679,6 +839,7 @@ class RequestTab:
             self.method_var.set("GET")
             self.clear_headers()
             self.body_text.delete(1.0, tk.END)
+            self.clear_files(confirm=False)
             self.clear_response()
 
     def clear_response(self):
@@ -706,6 +867,11 @@ class RequestTab:
         method = self.method_var.get()
         headers = self.collect_headers()
         body = None
+        has_files = bool(self.selected_files)
+
+        if has_files and method in ["GET", "HEAD", "OPTIONS"]:
+            messagebox.showerror("错误", f"{method} 请求不支持文件上传，请切换到 POST、PUT、PATCH 或 DELETE")
+            return
 
         if method in ["POST", "PUT", "PATCH", "DELETE"]:
             body = self.body_text.get(1.0, tk.END).strip()
@@ -727,22 +893,30 @@ class RequestTab:
         try:
             start_time = datetime.now()
 
-            if method == "GET":
-                response = requests.get(url, headers=headers, timeout=timeout, verify=verify_ssl)
-            elif method == "POST":
-                response = requests.post(url, headers=headers, data=body, timeout=timeout, verify=verify_ssl)
-            elif method == "PUT":
-                response = requests.put(url, headers=headers, data=body, timeout=timeout, verify=verify_ssl)
-            elif method == "DELETE":
-                response = requests.delete(url, headers=headers, timeout=timeout, verify=verify_ssl)
-            elif method == "PATCH":
-                response = requests.patch(url, headers=headers, data=body, timeout=timeout, verify=verify_ssl)
-            elif method == "HEAD":
-                response = requests.head(url, headers=headers, timeout=timeout, verify=verify_ssl)
-            elif method == "OPTIONS":
-                response = requests.options(url, headers=headers, timeout=timeout, verify=verify_ssl)
-            else:
-                raise ValueError(f"不支持的方法: {method}")
+            request_headers = dict(headers)
+            upload_files = None
+            opened_files = []
+            try:
+                if has_files:
+                    for key in list(request_headers.keys()):
+                        if key.lower() == "content-type":
+                            del request_headers[key]
+                    upload_files, opened_files = self.collect_upload_files()
+
+                request_data = self.collect_multipart_data(body) if has_files else body or None
+
+                response = requests.request(
+                    method,
+                    url,
+                    headers=request_headers,
+                    data=request_data,
+                    files=upload_files,
+                    timeout=timeout,
+                    verify=verify_ssl
+                )
+            finally:
+                for file_obj in opened_files:
+                    file_obj.close()
 
             end_time = datetime.now()
             elapsed = (end_time - start_time).total_seconds()
@@ -817,6 +991,9 @@ class RequestTab:
         self.body_text.delete(1.0, tk.END)
         if request_data.get('body'):
             self.body_text.insert(1.0, request_data['body'])
+
+        # 历史记录只保存请求内容，不保存本地文件路径
+        self.clear_files(confirm=False)
 
 
 class SaveRequestDialog:
