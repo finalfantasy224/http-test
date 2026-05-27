@@ -116,7 +116,7 @@ class HistoryDB:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT name, category, method, url, headers, body, response_info
+            SELECT id, name, category, method, url, headers, body, response_info
             FROM requests
             WHERE id = ?
         ''', (request_id,))
@@ -125,15 +125,16 @@ class HistoryDB:
         conn.close()
 
         if row:
-            headers = json.loads(row[4]) if row[4] else {}
+            headers = json.loads(row[5]) if row[5] else {}
             return {
-                'name': row[0],
-                'category': row[1],
-                'method': row[2],
-                'url': row[3],
+                'id': row[0],
+                'name': row[1],
+                'category': row[2],
+                'method': row[3],
+                'url': row[4],
                 'headers': headers,
-                'body': row[5] or '',
-                'response_info': row[6]
+                'body': row[6] or '',
+                'response_info': row[7]
             }
         return None
 
@@ -143,9 +144,11 @@ class HistoryDB:
         cursor = conn.cursor()
 
         cursor.execute('DELETE FROM requests WHERE id = ?', (request_id,))
-
+        deleted = cursor.rowcount > 0
+        
         conn.commit()
         conn.close()
+        return deleted
 
     def get_categories(self):
         """获取所有分类"""
@@ -172,6 +175,18 @@ class HistoryDB:
         except sqlite3.IntegrityError:
             conn.close()
             return None
+
+    def delete_category(self, name):
+        """删除分类"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('DELETE FROM categories WHERE name = ?', (name,))
+        deleted = cursor.rowcount > 0
+
+        conn.commit()
+        conn.close()
+        return deleted
 
     def search_requests(self, keyword):
         """搜索请求记录"""
