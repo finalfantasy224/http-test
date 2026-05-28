@@ -39,6 +39,60 @@ python3 http_client_enhanced.py
 python3 check_env.py
 ```
 
+## 🖥️ CLI 命令行工具
+
+除 GUI 外，项目还提供一个功能完整的 CLI 命令行工具，支持 HTTP 请求发送、历史管理、curl 导入导出、工作流编排和文件上传等能力，适合脚本化与自动化场景。
+
+### 安装 CLI
+
+```bash
+cd agent-harness
+pip install -e .
+```
+
+安装后可通过 `http-test` 命令使用（也可直接运行 `python3 agent-harness/cli_anything/http_test/http_test_cli.py`）。
+
+### 快速示例
+
+```bash
+# 发送 GET 请求
+http-test get https://httpbin.org/get
+
+# 发送 POST 请求（JSON body）
+http-test post https://httpbin.org/post -H 'Content-Type: application/json' -d '{"name":"demo"}'
+
+# 文件上传（multipart/form-data）
+http-test post https://httpbin.org/post -F file=./sample.txt
+
+# 上传多个文件并附带表单字段
+http-test send https://httpbin.org/post -m POST -F avatar=./avatar.png -d '{"user":"demo"}'
+
+# 导入 curl 命令
+http-test curl "curl -X POST https://api.example.com -H 'Content-Type: application/json' -d '{}'"
+
+# JSON 输出模式（便于程序解析）
+http-test --json get https://httpbin.org/get
+
+# 交互式 REPL 模式
+http-test
+```
+
+> CLI 的详细信息、全部命令参考和架构说明见 [`agent-harness/HTTP-TEST.md`](agent-harness/HTTP-TEST.md)。
+
+### 运行 CLI 测试
+
+```bash
+# 单元测试（无需网络）
+cd agent-harness/cli_anything/http_test
+python3 tests/test_core.py
+
+# 完整测试（部分需要网络）
+python3 tests/test_full_e2e.py
+
+# 全部测试
+python3 -m unittest discover -s tests -v
+```
+
 ## 🚀 快速开始
 
 ### 创建新标签页
